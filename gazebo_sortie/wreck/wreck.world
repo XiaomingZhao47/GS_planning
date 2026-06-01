@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<sdf version="1.5">
+  <world name="wreck">
+
+    <!-- ROS 2 bridges. gazebo_ros_init + gazebo_ros_factory are SYSTEM plugins
+         (loaded via gzserver -s); gazebo_ros_state is a WORLD plugin and must
+         be declared here (Gazebo rejects it with "incorrect plugin type" otherwise). -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros><namespace>/</namespace></ros>
+      <update_rate>50</update_rate>
+    </plugin>
+
+    <physics name="default_physics" default="true" type="ode">
+      <max_step_size>0.01</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>100</real_time_update_rate>
+    </physics>
+
+    <scene>
+      <ambient>0.45 0.45 0.45 1</ambient>
+      <background>0.05 0.08 0.12 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <!-- Three-point lighting so the wreck is well-lit for 3DGS reconstruction.
+         (Original UUV world had blue-fog scattering; we drop it for clean RGB.) -->
+    <light type="directional" name="key">
+      <pose>0 0 50 0 0 0</pose>
+      <diffuse>0.85 0.85 0.80 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>0.2 0.1 -1</direction>
+      <cast_shadows>true</cast_shadows>
+    </light>
+    <light type="directional" name="fill">
+      <pose>-50 0 0 0 0 0</pose>
+      <diffuse>0.35 0.40 0.45 1</diffuse>
+      <direction>1 0 -0.3</direction>
+      <cast_shadows>false</cast_shadows>
+    </light>
+    <light type="directional" name="rim">
+      <pose>0 -50 0 0 0 0</pose>
+      <diffuse>0.30 0.30 0.35 1</diffuse>
+      <direction>0 1 -0.2</direction>
+      <cast_shadows>false</cast_shadows>
+    </light>
+
+    <!-- Wreck on the seabed (original UUV poses preserved). -->
+    <include>
+      <uri>model://herkules_seabed</uri>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://herkules_ship_wreck</uri>
+      <pose>0 0 -60 0 0 1.57</pose>
+    </include>
+
+    <!-- 6-DoF camera, starts 15 m east of the wreck looking inward with a
+         slight downward pitch. Teleport via /set_entity_state thereafter. -->
+    <include>
+      <uri>model://freefly_cam</uri>
+      <name>freefly_cam</name>
+      <pose>15 0 -57 0 0.2 3.14159</pose>
+    </include>
+
+  </world>
+</sdf>
