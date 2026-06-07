@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Multi-metric evaluation across wreck-experiment planners.
 
-For each model under data/wreck_exp1/model_<method>_B18:
+For each model under <root>/model_<method>_B18:
   - ensure test views are rendered (render.py --skip_train if missing)
   - run Inria metrics.py -> PSNR, SSIM, LPIPS in results.json
   - count Gaussians in the trained ply
   - record selected indices + bootstrap
 
-Outputs a consolidated table to data/wreck_exp1/multimetric_results.json
+Outputs a consolidated table to <root>/multimetric_results.json
 and a markdown summary.
+
+By default <root> is data/wreck_exp1/ (legacy flat layout). With --seed N
+<root> becomes data/wreck_exp1/seed_{N}/, matching the layout produced by
+`exp1_run.py --seed N`.
 """
 from __future__ import annotations
-import json, os, subprocess, sys
+import argparse, json, os, subprocess, sys
 from pathlib import Path
 
 ROOT = Path("/home/xiaoming/GS_planning_handoff")
@@ -53,11 +57,19 @@ def run_metrics(model_dir: Path):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Read from data/wreck_exp1/seed_{N}/ instead of "
+                         "the flat legacy layout.")
+    args = ap.parse_args()
+    root = (DATA / f"seed_{args.seed}") if args.seed is not None else DATA
+    print(f"root: {root}")
+
     summary = {}
     for m in METHODS:
-        mdir = DATA / f"model_{m}_B18"
+        mdir = root / f"model_{m}_B18"
         if not mdir.exists():
-            print(f"SKIP {m}: model dir missing")
+            print(f"SKIP {m}: model dir missing ({mdir})")
             continue
         print(f"=== {m} ===")
         ensure_renders(mdir)
@@ -69,7 +81,7 @@ def main():
                       "n_gaussians": gauss}
         print(f"  PSNR  {summary[m]['PSNR']:.3f}  SSIM {summary[m]['SSIM']:.4f}  LPIPS {summary[m]['LPIPS']:.4f}  |  {gauss} Gaussians")
 
-    out = DATA / "multimetric_results.json"
+    out = root / "multimetric_results.json"
     out.write_text(json.dumps(summary, indent=2))
     print(f"\nwrote {out}")
 
@@ -79,7 +91,7 @@ def main():
     for m, r in summary.items():
         if r["PSNR"] is None: continue
         md.append(f"| {m} | {r['PSNR']:.2f} | {r['SSIM']:.4f} | {r['LPIPS']:.4f} | {r['n_gaussians']:,} |")
-    (DATA / "multimetric_results.md").write_text("\n".join(md) + "\n")
+    (root / "multimetric_results.md").write_text("\n".join(md) + "\n")
     print("\n" + "\n".join(md))
 
 

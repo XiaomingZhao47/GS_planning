@@ -21,6 +21,23 @@ ROOT    = Path("/home/xiaoming/GS_planning_handoff")
 DATA    = ROOT / "data/wreck_exp1"
 GS_REPO = Path("/home/xiaoming/gaussian-splatting")
 PY      = str(Path.home() / "miniconda3/envs/gs_planning/bin/python")
+SEEDED_TRAIN = ROOT / "gazebo_sortie/seeded_train.py"
+
+
+def _train_env(seed):
+    """Subprocess env that forwards GS_SEED when set."""
+    if seed is None:
+        return None
+    env = os.environ.copy()
+    env["GS_SEED"] = str(int(seed))
+    return env
+
+
+def _train_entry(seed):
+    """Return the python script that drives one Inria GS run. When `seed`
+    is None we invoke Inria's train.py directly (legacy). When `seed` is
+    set we go through seeded_train.py, which monkey-patches safe_state."""
+    return str(SEEDED_TRAIN) if seed is not None else str(GS_REPO / "train.py")
 
 sys.path.insert(0, str(ROOT))
 from src.planner.occupancy_grid import OccupancyGrid3D  # noqa: E402
@@ -222,7 +239,7 @@ def plan_volumetric(poses, depths, intr, bootstrap, B):
 
 # --- Q3: bootstrap mini-GS + occupancy. Q3 gain = unknown + alpha * under-rec ---
 
-def _train_mini_gs(sel_poses, sel_imgs, sel_depths, intr, work_dir, iterations=1500):
+def _train_mini_gs(sel_poses, sel_imgs, sel_depths, intr, work_dir, iterations=1500, seed=None):
     work_dir = Path(work_dir); work_dir.mkdir(parents=True, exist_ok=True)
     ds = work_dir / "mini_ds"; ds.mkdir(exist_ok=True); (ds / "train").mkdir(exist_ok=True)
     frames = []
@@ -241,13 +258,14 @@ def _train_mini_gs(sel_poses, sel_imgs, sel_depths, intr, work_dir, iterations=1
     (ds / "transforms_test.json").write_text(json.dumps(manifest, indent=2))
     write_seed_ply(ds / "points3d.ply", sel_poses, sel_depths, intr)
     mdir = work_dir / "mini_model"
-    cmd = [PY, str(GS_REPO / "train.py"),
+    cmd = [PY, _train_entry(seed),
            "-s", str(ds), "-m", str(mdir),
            "--iterations", str(iterations),
            "--disable_viewer",
            "--opacity_reset_interval", "999999",
            "--densify_until_iter", str(min(iterations - 200, 1200))]
-    subprocess.run(cmd, cwd=str(GS_REPO), capture_output=True, text=True, check=True)
+    subprocess.run(cmd, cwd=str(GS_REPO), env=_train_env(seed),
+                   capture_output=True, text=True, check=True)
     return mdir / "point_cloud" / f"iteration_{iterations}" / "point_cloud.ply"
 
 
@@ -307,13 +325,13 @@ def _score_q3(g, gs_mask, pose, alpha=0.5, n_rays=128, max_steps=40,
 
 
 def plan_q3(poses, imgs, depths, intr, bootstrap, B, work_dir, iterations=1500,
-            near_surface_iters=0, max_per_alt=None):
+            near_surface_iters=0, max_per_alt=None, seed=None):
     n_extra = B - len(bootstrap)
     g = _build_grid(poses, depths, intr, bootstrap)
     print(f"  octo: occ={int(g.occupied().sum())} free={int(g.free().sum())} unk={int(g.unknown().sum())}")
     print(f"  training sortie-1 GS on {len(bootstrap)} frames ({iterations} iters)...")
     bs_p = poses[bootstrap]; bs_i = [imgs[i] for i in bootstrap]; bs_d = [depths[i] for i in bootstrap]
-    ply = _train_mini_gs(bs_p, bs_i, bs_d, intr, work_dir, iterations=iterations)
+    ply = _train_mini_gs(bs_p, bs_i, bs_d, intr, work_dir, iterations=iterations, seed=seed)
     gs_mask = _gs_density_mask(ply, g.origin, g.dims, g.cell)
     print(f"  gs voxels: {int(gs_mask.sum())} | near-surface dilations: {near_surface_iters} | altcap: {max_per_alt}")
     cands = [i for i in range(poses.shape[0]) if i not in bootstrap]
@@ -327,16 +345,17 @@ def plan_q3(poses, imgs, depths, intr, bootstrap, B, work_dir, iterations=1500,
 
 # ─── train / parse ──────────────────────────────────────────────
 
-def train_one(source_dir, model_dir, iterations=7000):
-    cmd = [PY, str(GS_REPO / "train.py"),
+def train_one(source_dir, model_dir, iterations=7000, seed=None):
+    cmd = [PY, _train_entry(seed),
            "-s", str(source_dir), "-m", str(model_dir),
            "--iterations", str(iterations),
            "--disable_viewer",
            "--opacity_reset_interval", "999999",
            "--densify_until_iter", "5000",
            "--eval"]
-    print("  RUN:", " ".join(cmd))
-    r = subprocess.run(cmd, cwd=str(GS_REPO), capture_output=True, text=True)
+    print("  RUN:", " ".join(cmd), f"(seed={seed})" if seed is not None else "")
+    r = subprocess.run(cmd, cwd=str(GS_REPO), env=_train_env(seed),
+                       capture_output=True, text=True)
     return r.stdout + "\n" + r.stderr
 
 
@@ -357,13 +376,23 @@ def main():
     ap.add_argument("--budget", type=int, default=18)
     ap.add_argument("--methods", nargs="+",
                     default=["uniform", "random", "volumetric", "q3"])
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Override Inria GS RNG seed. Outputs are routed "
+                         "to data/wreck_exp1/seed_{N}/... When omitted, "
+                         "legacy flat layout + Inria's hardcoded seed=0.")
     args = ap.parse_args()
+
+    # Per-seed output root. Bootstrap, candidate pool, and heldout are
+    # always read from the canonical (seed-independent) location.
+    out_root = DATA / f"seed_{args.seed}" if args.seed is not None else DATA
+    out_root.mkdir(parents=True, exist_ok=True)
 
     cand_poses, intr, cand_imgs, cand_deps = load_sortie(DATA / "candidates")
     held_poses, _,    held_imgs, _         = load_sortie(DATA / "heldout")
     n_cand = len(cand_poses)
     print(f"loaded {n_cand} candidates, {len(held_poses)} held-out")
-    print(f"bootstrap indices: {BOOTSTRAP_INDICES}\n")
+    print(f"bootstrap indices: {BOOTSTRAP_INDICES}")
+    print(f"seed: {args.seed}  ->  out_root: {out_root}\n")
 
     results = {}
     for m in args.methods:
@@ -377,40 +406,43 @@ def main():
                                   BOOTSTRAP_INDICES, args.budget)
         elif m == "q3":
             sel = plan_q3(cand_poses, cand_imgs, cand_deps, intr,
-                          BOOTSTRAP_INDICES, args.budget, DATA / "q3_work",
-                          iterations=1500)
+                          BOOTSTRAP_INDICES, args.budget, out_root / "q3_work",
+                          iterations=1500, seed=args.seed)
         elif m == "q3_iter":
             # Exp 2: real multi-sortie loop. Train a full sortie-1 GS (7k iters)
             # then run Q3 on its actual density field, not a 1500-iter bootstrap.
             sel = plan_q3(cand_poses, cand_imgs, cand_deps, intr,
-                          BOOTSTRAP_INDICES, args.budget, DATA / "q3_iter_work",
-                          iterations=7000)
+                          BOOTSTRAP_INDICES, args.budget, out_root / "q3_iter_work",
+                          iterations=7000, seed=args.seed)
         elif m == "q3_refined":
             # Full refined Q3 = near-surface mask + altitude-capped NMS.
             sel = plan_q3(cand_poses, cand_imgs, cand_deps, intr,
-                          BOOTSTRAP_INDICES, args.budget, DATA / "q3_refined_work",
-                          iterations=7000, near_surface_iters=2, max_per_alt=4)
+                          BOOTSTRAP_INDICES, args.budget, out_root / "q3_refined_work",
+                          iterations=7000, near_surface_iters=2, max_per_alt=4,
+                          seed=args.seed)
         elif m == "q3_altcap":
             # Ablation: altitude cap only (naive under-rec score).
             sel = plan_q3(cand_poses, cand_imgs, cand_deps, intr,
-                          BOOTSTRAP_INDICES, args.budget, DATA / "q3_altcap_work",
-                          iterations=7000, near_surface_iters=0, max_per_alt=4)
+                          BOOTSTRAP_INDICES, args.budget, out_root / "q3_altcap_work",
+                          iterations=7000, near_surface_iters=0, max_per_alt=4,
+                          seed=args.seed)
         elif m == "q3_nearsurf":
             # Ablation: near-surface mask only (no altitude cap).
             sel = plan_q3(cand_poses, cand_imgs, cand_deps, intr,
-                          BOOTSTRAP_INDICES, args.budget, DATA / "q3_nearsurf_work",
-                          iterations=7000, near_surface_iters=2, max_per_alt=None)
+                          BOOTSTRAP_INDICES, args.budget, out_root / "q3_nearsurf_work",
+                          iterations=7000, near_surface_iters=2, max_per_alt=None,
+                          seed=args.seed)
         else:
             print(f"  unknown: {m}"); continue
         print(f"  selected ({len(sel)}): {sel}")
 
-        ds  = DATA / f"ds_{m}_B{args.budget}"
-        mdl = DATA / f"model_{m}_B{args.budget}"
+        ds  = out_root / f"ds_{m}_B{args.budget}"
+        mdl = out_root / f"model_{m}_B{args.budget}"
         sp  = cand_poses[sel]
         si  = [cand_imgs[i] for i in sel]
         sd  = [cand_deps[i] for i in sel]
         make_dataset(ds, sp, si, sd, held_poses, held_imgs, intr)
-        log = train_one(ds, mdl)
+        log = train_one(ds, mdl, seed=args.seed)
         test_psnr, train_psnr = parse_psnr(log)
         print(f"  test PSNR  = {test_psnr}")
         print(f"  train PSNR = {train_psnr}\n")
@@ -418,7 +450,7 @@ def main():
                       "test_psnr": test_psnr,
                       "train_psnr": train_psnr}
 
-    out = DATA / f"results_B{args.budget}.json"
+    out = out_root / f"results_B{args.budget}.json"
     out.write_text(json.dumps(results, indent=2))
     print(f"wrote {out}")
     print("\nSUMMARY (held-out PSNR per method, B={}):".format(args.budget))
